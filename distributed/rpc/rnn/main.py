@@ -8,6 +8,7 @@ import torch.multiprocessing as mp
 import torch.optim as optim
 from torch.distributed.optim import DistributedOptimizer
 from torch.distributed.rpc import RRef
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 import rnn
 
@@ -86,4 +87,4 @@ def run_worker(rank, world_size):
 
 if __name__=="__main__":
     world_size = 2
-    mp.spawn(run_worker, args=(world_size, ), nprocs=world_size, join=True)
+    xmp.spawn(run_worker, args=(world_size, ), nprocs=world_size, join=True)

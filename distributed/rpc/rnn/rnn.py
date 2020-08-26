@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.distributed.rpc as rpc
 from torch.distributed.rpc import RRef
+import torch_xla.core.xla_model as xm
 
 
 def _call_method(method, rref, *args, **kwargs):
@@ -40,12 +41,14 @@ class EmbeddingTable(nn.Module):
     """
     def __init__(self, ntoken, ninp, dropout):
         super(EmbeddingTable, self).__init__()
+        device = xm.xla_device()
         self.drop = nn.Dropout(dropout)
-        self.encoder = nn.Embedding(ntoken, ninp).cuda()
+        self.encoder = nn.Embedding(ntoken, ninp).to(device)
         nn.init.uniform_(self.encoder.weight, -0.1, 0.1)
 
     def forward(self, input):
-        return self.drop(self.encoder(input.cuda())).cpu()
+        device = xm.xla_device()
+        return self.drop(self.encoder(input.to(device))).cpu()
 
 
 class Decoder(nn.Module):
@@ -72,21 +75,23 @@ class RNNModel(nn.Module):
     """
     def __init__(self, ps, ntoken, ninp, nhid, nlayers, dropout=0.5):
         super(RNNModel, self).__init__()
-
+        device = xm.xla_device()
         # setup embedding table remotely
         self.emb_table_rref = rpc.remote(ps, EmbeddingTable, args=(ntoken, ninp, dropout))
         # setup LSTM locally
-        self.rnn = nn.LSTM(ninp, nhid, nlayers, dropout=dropout)
+        self.rnn = nn.LSTM(ninp, nhid, nlayers, dropout=dropout).to(device)
         # setup decoder remotely
         self.decoder_rref = rpc.remote(ps, Decoder, args=(ntoken, nhid, dropout))
 
     def forward(self, input, hidden):
+        device = xm.xla_device()
         # pass input to the remote embedding table and fetch emb tensor back
         emb = _remote_method(EmbeddingTable.forward, self.emb_table_rref, input)
-        output, hidden = self.rnn(emb, hidden)
+        hidden_xla = [h.to(device) for h in hidden]
+        output, hidden_xla = self.rnn(emb.to(device), hidden_xla)
         # pass output to the rremote decoder and get the decoded output back
-        decoded = _remote_method(Decoder.forward, self.decoder_rref, output)
-        return decoded, hidden
+        decoded = _remote_method(Decoder.forward, self.decoder_rref, output.cpu())
+        return decoded, [h.cpu() for h in hidden_xla]
 
     def parameter_rrefs(self):
         remote_params = []
